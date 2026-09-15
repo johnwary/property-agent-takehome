@@ -123,11 +123,35 @@ hold any number of tenants; a partial unique index limits only how many of them
 are the *primary* contact.
 
 **Left to the application - at least one tenant.** Nothing stops an empty
-`family` row, and `property.family_id` may be NULL. Enforcing a minimum child
-count needs a deferred constraint or a trigger, both of which make ordinary
-inserts awkward. It belongs at the application's transaction boundary: create a
-family together with its first tenant, and refuse to remove the last tenant of
-an occupied property.
+`family` row, and `property.family_id` may be NULL. This is not a scope cut:
+the constraint is not expressible in a relational schema, because `tenant`
+holds the foreign key to `family`. The family row must exist before any tenant
+can reference it, and at that moment it legally has zero tenants.
+
+All three available mechanisms were tried against Postgres 16, not reasoned
+about abstractly:
+
+| Mechanism | Result |
+| --- | --- |
+| `CHECK` counting tenants | `ERROR: cannot use subquery in check constraint` - a CHECK cannot read another table |
+| `CONSTRAINT TRIGGER` (immediate) | `ERROR: family 1 has no tenants` on the legitimate `INSERT INTO family` - it rejects its own first insert |
+| `DEFERRABLE INITIALLY DEFERRED` | Works on insert: family + tenant in one transaction commits, family alone fails at `COMMIT`. **But** an `AFTER INSERT` trigger never fires on `DELETE FROM tenant`, so deleting the last tenant leaves the family empty and the rule silently broken |
+
+So the deferred trigger only half-works. Full coverage means a second trigger
+on `tenant` for `DELETE` and `UPDATE OF family_id`, and the pair has to agree
+about transaction boundaries and bulk operations. That is real machinery to
+encode a rule the application already owns and applies through a single code
+path for family creation.
+
+It therefore belongs at the application's transaction boundary: create a family
+together with its first tenant, and refuse to remove the last tenant of an
+occupied property.
+
+**The general principle this reflects:** prefer constraints that make a bad
+state *unrepresentable* over constraints that merely detect it. The single-family
+rule qualifies - there is no second column to hold a second family, so no check
+is needed. The minimum-tenant rule does not, so it is enforced where it can be
+enforced honestly, and documented here rather than overclaimed.
 
 **Assumption beyond the brief - vacancy.** The brief implies every property has
 tenants. `family_id` is nullable anyway, because real properties sit empty

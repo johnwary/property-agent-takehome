@@ -90,34 +90,33 @@ erDiagram
 
 | From | To | Cardinality | Rule |
 | --- | --- | --- | --- |
-| `agent` | `property` | 1 : 0..N | A property is managed by exactly one agent; an agent may manage none or many. Deleting an agent who still holds properties is refused (`ON DELETE RESTRICT`) rather than cascading a portfolio away. |
-| `family` | `property` | 0..1 : 0..1 | A leased property references exactly one family, and a family occupies at most one current property (`UNIQUE (property.family_id)`). A vacant property has `family_id IS NULL`. |
-| `family` | `tenant` | 1 : 0..N enforced, 1..N intended | A tenant belongs to exactly one family. The schema cannot require a minimum child count - see the note below. |
-| `agent` | `note` | 1 : 0..N | Every note has exactly one authoring agent. |
-| `property` | `note` | 0..1 : 0..N | A note may target a property, or be a general agent note (`property_id IS NULL`). |
+| `agent` | `property` | 1 : 0..N | One managing agent per property. Deleting an agent who still holds properties is refused (`ON DELETE RESTRICT`), never cascaded. |
+| `family` | `property` | 0..1 : 0..1 | One family per property, one current property per family (`UNIQUE (property.family_id)`). Vacant means `family_id IS NULL`. |
+| `family` | `tenant` | 1 : 1..N | A tenant belongs to exactly one family. The `1..N` minimum is enforced in the application, not the schema - see below. |
+| `agent` | `note` | 1 : 0..N | Every note has one authoring agent. |
+| `property` | `note` | 0..1 : 0..N | A note targets a property, or is a general agent note (`property_id IS NULL`). |
 
-A reminder is not its own table: it is a note with a `due_at`, outstanding
-while `completed_at IS NULL`. Two tables would duplicate four columns to
-express one nullable difference, and force a UNION to answer "show me
-everything on this property".
+A reminder is not a separate table: it is a note with a `due_at`, outstanding
+while `completed_at IS NULL`.
 
-### What the schema does and does not guarantee
+### Where "1 or more tenants" is enforced
 
-The requirement is *"each property has 1 or more tenants belonging to a single
-family."* Those are two claims, and structure enforces only one.
+In the application, not the schema: a family is created together with its first
+tenant, and the last tenant of an occupied property cannot be removed.
 
-- **Guaranteed - a single family.** A property holds one nullable `family_id`,
-  so there is no column that could hold a second family. The rule is
-  impossible to violate rather than merely checked.
-- **Not guaranteed - at least one tenant.** An empty `family` row is legal and
-  `property.family_id` may be NULL. A minimum child count belongs at the
-  application's transaction boundary: create a family together with its first
-  tenant, refuse to remove the last tenant of an occupied property. A deferred
-  constraint or trigger would make ordinary inserts awkward for no real gain at
-  this size.
+Not a shortcut - **no relational schema can express it.** `tenant` holds the
+pointer to `family`, so the family row must exist first, and at that instant it
+legally has zero tenants. A `CHECK` cannot query another table, an immediate
+trigger rejects that legitimate first insert, and a deferred one still misses
+the last tenant being deleted later. Working through all three, with the actual
+Postgres errors, is in [`docs/README.md`](docs/README.md).
 
-Known limitation: there is no `lease` table, so `property.family_id` records
-who lives there *now* with no tenancy history. The fix is documented in
+What the schema does instead is make the other half of the rule *impossible*
+rather than merely checked: a property cannot reference two families, because
+there is no second column to hold one.
+
+Known limitation: no `lease` table, so `property.family_id` records who lives
+there *now* with no tenancy history. Fix documented in
 [`docs/README.md`](docs/README.md).
 
 ## Requirements
