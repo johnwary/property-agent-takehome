@@ -205,6 +205,12 @@ client that saved unconditionally. A client must now:
 3. Replace its stored ETag with the one on the `200` response.
 4. Treat `412` as "someone else changed this", not as a validation error.
 
+Point 1 says *loaded* deliberately. A tag must come from a representation the
+user actually saw, not from a `GET` issued at save time to satisfy the header:
+that would make `If-Match` assert "I am editing the current revision" about
+data nobody looked at, and a concurrent edit would be overwritten with a `200`.
+The check is only as good as the provenance of the tag.
+
 **`apps/web` implements this contract.** See
 [`apps/web/README.md`](../web/README.md#optimistic-concurrency) for how the
 form acquires, sends, and refreshes the `ETag`, and what it does on `412`.

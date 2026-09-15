@@ -15,11 +15,13 @@ calls same-origin relative paths and there's no CORS setup on the API.
 Per the brief, listing and deleting are shown as curl/Postman requests in
 [`apps/api/README.md`](../api/README.md) - this form has no UI for either. To
 update an existing agent, paste its `id` (from a `GET /agents` or the
-response of a prior create) into the "Agent id" field; leaving it blank
-creates a new one.
+response of a prior create) into the "Agent id" field and press **Load**;
+leaving the field blank creates a new one.
 
-The form does call `GET /agents/:id` itself, but only as a mechanism, never
-as a feature a person drives directly - see "Optimistic concurrency" below.
+The form calls `GET /agents/:id` when you press Load. That is not a
+list/read feature standing in for the curl ones - it is how the form obtains
+the version you are editing, which conditional saving depends on. See
+"Optimistic concurrency" below.
 
 ## Error handling: FE vs BE
 
@@ -42,12 +44,17 @@ whatever the API decides. Two reasons:
 [`apps/api/README.md`](../api/README.md#optimistic-concurrency)) - the form
 implements the client side of that contract:
 
-- **Acquiring the tag.** An agent the form just created or updated has its
-  `ETag` cached in memory, keyed by id, from that response's header. Editing
-  an id pasted in by hand - one the form never loaded itself - has nothing
-  cached yet, so the form does one `GET /agents/:id` first to learn the
-  current tag, then `PUT`s with it. A missing agent surfaces the same "agent
-  not found" either way.
+- **Acquiring the tag.** The only two ways the form gets an `ETag` are a
+  save it performed itself (the response header) and pressing **Load**
+  (`GET /agents/:id`, which fills the fields and captures the tag together).
+  Both hand the user the data the tag describes.
+- **No tag, no update.** An id with no tag for it cannot be saved: the
+  Update button is disabled, with "Press Load to fetch this agent before
+  updating it." Fetching a tag at save time instead would defeat the check -
+  `If-Match` would assert "I am editing the current revision" about data the
+  user never saw, so an edit that landed while they typed would be
+  overwritten with a `200`. Editing the id to a different unloaded agent
+  disables the button again, so one agent's tag can never be sent at another.
 - **Refreshing it.** Every successful save replaces the cached tag with the
   one on that response, not the one that was just spent - otherwise a second
   save in the same sitting would fail as if it were already stale.
@@ -58,6 +65,10 @@ implements the client side of that contract:
   and offers a "Reload current version" button that fetches and displays the
   real current record (and refreshes the cached tag) so the user can compare
   it against their own edit and decide what to keep before saving again.
+  Refreshing the tag there does let them save their version over the one
+  shown - deliberately, because the competing record is on screen beside it,
+  which makes keeping their edit an informed choice rather than a silent
+  overwrite.
 
 Tried in a real browser: two edits of the same agent, one via curl and one
 via the form, in the order the form's save would lose if this weren't here.

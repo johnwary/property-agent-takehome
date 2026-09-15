@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from "vue";
+import { computed, reactive, ref } from "vue";
 import type { Agent, AgentInput, ApiErrorBody, FieldIssue } from "./agent";
 
 // Human-readable labels for API field names, so "is required" reads as
@@ -38,15 +38,29 @@ const knownETags = reactive<Record<string, string>>({});
 // request was in flight would re-enable the button, let a second request
 // start, and whichever response lands second would silently overwrite the
 // first one's result.
-type Status = "idle" | "success" | "error" | "conflict";
+type Status = "idle" | "loaded" | "success" | "error" | "conflict";
 const status = ref<Status>("idle");
 const isSubmitting = ref(false);
+const isLoading = ref(false);
 const fieldErrors = ref<Partial<Record<keyof AgentInput, string>>>({});
 const formError = ref("");
 const savedAgent = ref<Agent | null>(null);
 // Set only after a 412, by reloadAfterConflict(), so the user can compare
 // the version that beat them against what they still have typed above.
 const currentOnServer = ref<Agent | null>(null);
+// The agent as loaded, to confirm which record the form is now editing.
+const loadedAgent = ref<Agent | null>(null);
+// Error from the conflict box's own reload, kept separate from formError so a
+// failed reload cannot overwrite the "changed by someone else" explanation
+// the box is built around.
+const reloadError = ref("");
+
+/**
+ * Whether the form holds a tag for the id currently typed in. Editing the id
+ * to something unloaded makes this false, which is what stops a PUT built
+ * from one agent's fields being sent at another agent.
+ */
+const hasLoadedTag = computed(() => !!knownETags[id.value.trim()]);
 
 function resetMessages() {
   status.value = "idle";
@@ -54,20 +68,56 @@ function resetMessages() {
   formError.value = "";
   savedAgent.value = null;
   currentOnServer.value = null;
+  loadedAgent.value = null;
+  reloadError.value = "";
 }
 
 /**
- * GETs the agent to learn its current ETag - needed the first time this
- * form edits an id it did not itself just create or update, since If-Match
- * has no value to send otherwise. Returns null (and reports 404 like any
- * other failure) if the id doesn't exist.
+ * Loads an agent into the form: fills the fields AND captures its ETag.
+ *
+ * The two must happen together. An ETag fetched without showing the user
+ * the data it describes is a rubber stamp - If-Match would assert "I am
+ * editing this revision" about a version nobody ever saw, and a colleague's
+ * edit made in between would be overwritten with a 200. So the tag is only
+ * ever acquired here, alongside the fields it belongs to.
  */
-async function fetchETag(agentId: string): Promise<string | null> {
-  const res = await fetch(`/agents/${agentId}`);
-  if (!res.ok) return null;
-  const etag = res.headers.get("etag");
-  if (etag) knownETags[agentId] = etag;
-  return etag;
+async function loadAgent() {
+  const agentId = id.value.trim();
+  if (!agentId || isLoading.value) return;
+  isLoading.value = true;
+  resetMessages();
+
+  try {
+    const res = await fetch(`/agents/${agentId}`);
+    if (!res.ok) {
+      status.value = "error";
+      formError.value = res.status === 404 ? "agent not found" : "could not load that agent";
+      return;
+    }
+
+    const agent = (await res.json()) as Agent;
+    const etag = res.headers.get("etag");
+    // No ETag means a later PUT could not be conditional, so treat it as a
+    // failed load rather than filling the form with data we can't safely save.
+    if (!etag) {
+      status.value = "error";
+      formError.value = "could not load that agent";
+      return;
+    }
+
+    knownETags[agentId] = etag;
+    form.firstName = agent.firstName;
+    form.lastName = agent.lastName;
+    form.email = agent.email;
+    form.mobileNumber = agent.mobileNumber;
+    status.value = "loaded";
+    loadedAgent.value = agent;
+  } catch {
+    status.value = "error";
+    formError.value = "could not reach the server";
+  } finally {
+    isLoading.value = false;
+  }
 }
 
 /**
@@ -78,12 +128,29 @@ async function fetchETag(agentId: string): Promise<string | null> {
  */
 async function reloadAfterConflict() {
   const agentId = id.value.trim();
-  if (!agentId) return;
-  const res = await fetch(`/agents/${agentId}`);
-  if (!res.ok) return;
-  const etag = res.headers.get("etag");
-  if (etag) knownETags[agentId] = etag;
-  currentOnServer.value = (await res.json()) as Agent;
+  if (!agentId || isLoading.value) return;
+  isLoading.value = true;
+  reloadError.value = "";
+
+  try {
+    const res = await fetch(`/agents/${agentId}`);
+    if (!res.ok) {
+      reloadError.value = "could not load the current version";
+      return;
+    }
+    const etag = res.headers.get("etag");
+    const agent = (await res.json()) as Agent;
+    // Refreshing the tag here is what lets the user save their own version
+    // over the one shown. That is deliberate: unlike a blind save, the
+    // competing record is displayed right below, so keeping their edit is an
+    // informed choice rather than an overwrite they never knew they made.
+    if (etag) knownETags[agentId] = etag;
+    currentOnServer.value = agent;
+  } catch {
+    reloadError.value = "could not reach the server";
+  } finally {
+    isLoading.value = false;
+  }
 }
 
 async function submit() {
@@ -93,28 +160,26 @@ async function submit() {
   formError.value = "";
   savedAgent.value = null;
   currentOnServer.value = null;
+  loadedAgent.value = null;
+  reloadError.value = "";
 
   const agentId = id.value.trim();
   const isUpdate = agentId.length > 0;
 
   try {
     // PUT requires If-Match (see apps/api/README.md "Optimistic
-    // concurrency"). This form only ever learns an id's ETag from its own
-    // prior create/update in this session, so the first time it edits an id
-    // it didn't just save itself - pasted in by hand - there is nothing
-    // cached yet. One GET fills that in; a missing agent surfaces as the
-    // same 404 the PUT would have given anyway.
+    // concurrency"), and the only legitimate source for that tag is a load
+    // the user actually saw. Fetching it here instead would make the check
+    // meaningless: it would assert "I am editing the current revision"
+    // about data never shown, so an edit that landed while the user typed
+    // would be overwritten with a 200. Refuse instead, and point at Load.
     let ifMatch: string | undefined;
     if (isUpdate) {
       ifMatch = knownETags[agentId];
       if (!ifMatch) {
-        const fetched = await fetchETag(agentId);
-        if (!fetched) {
-          status.value = "error";
-          formError.value = "agent not found";
-          return;
-        }
-        ifMatch = fetched;
+        status.value = "error";
+        formError.value = "Load this agent first, so your changes apply to the version you can see.";
+        return;
       }
     }
 
@@ -186,15 +251,20 @@ async function submit() {
   <main>
     <h1>Property Agent</h1>
     <p class="hint">
-      Create a new agent, or fill in an existing <code>id</code> to update one.
-      Listing, viewing, and deleting are curl-only - see
+      Create a new agent, or load an existing <code>id</code> to update one.
+      Listing and deleting are curl-only - see
       <code>apps/api/README.md</code>.
     </p>
 
     <form @submit.prevent="submit">
       <label for="agent-id">
         Agent id <span class="optional">(leave blank to create)</span>
-        <input id="agent-id" v-model.trim="id" type="text" placeholder="existing agent id" @input="resetMessages" />
+        <span class="id-row">
+          <input id="agent-id" v-model.trim="id" type="text" placeholder="existing agent id" @input="resetMessages" />
+          <button type="button" :disabled="!id || isLoading || isSubmitting" @click="loadAgent">
+            {{ isLoading ? "Loading..." : "Load" }}
+          </button>
+        </span>
       </label>
 
       <label for="first-name">
@@ -249,12 +319,22 @@ async function submit() {
         <span id="mobile-number-error" class="field-error" role="alert">{{ fieldErrors.mobileNumber }}</span>
       </label>
 
-      <button type="submit" :disabled="isSubmitting">
+      <!-- An id with no loaded tag cannot be saved conditionally, so the
+           button is disabled rather than letting a click discover that. -->
+      <button type="submit" :disabled="isSubmitting || isLoading || (!!id && !hasLoadedTag)">
         {{ id ? "Update agent" : "Create agent" }}
       </button>
+      <p v-if="!!id && !hasLoadedTag" class="hint needs-load">
+        Press Load to fetch this agent before updating it.
+      </p>
     </form>
 
     <p v-if="status === 'error' && formError" class="form-error" role="alert">{{ formError }}</p>
+
+    <div v-if="status === 'loaded' && loadedAgent" class="loaded" role="status">
+      <p>Loaded. Edit the fields above and save.</p>
+      <pre>{{ JSON.stringify(loadedAgent, null, 2) }}</pre>
+    </div>
 
     <div v-if="status === 'conflict'" class="conflict" role="alert">
       <p>{{ formError }}</p>
@@ -262,7 +342,10 @@ async function submit() {
         What you typed above is untouched. Reload to see the current version, then
         reapply your changes and save again.
       </p>
-      <button type="button" @click="reloadAfterConflict">Reload current version</button>
+      <button type="button" :disabled="isLoading" @click="reloadAfterConflict">
+        {{ isLoading ? "Loading..." : "Reload current version" }}
+      </button>
+      <p v-if="reloadError" class="form-error">{{ reloadError }}</p>
       <pre v-if="currentOnServer">{{ JSON.stringify(currentOnServer, null, 2) }}</pre>
     </div>
 
@@ -335,6 +418,41 @@ button:disabled {
 .form-error {
   color: #b00020;
   margin-top: 1rem;
+}
+
+/* Input and its Load button side by side, wrapping on narrow screens. */
+.id-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.id-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.id-row button {
+  flex: 0 0 auto;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.needs-load {
+  margin: -0.5rem 0 0;
+}
+
+.loaded {
+  margin-top: 1rem;
+}
+
+.loaded pre {
+  background: #f5f5f5;
+  padding: 0.75rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.85rem;
 }
 
 .conflict {
