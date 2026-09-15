@@ -129,6 +129,7 @@ Table note {
   checks {
     `char_length(btrim(body)) > 0` [name: 'note_body_not_blank']
     `completed_at IS NULL OR due_at IS NOT NULL` [name: 'note_completed_requires_due']
+    `completed_at IS NULL OR completed_at >= created_at` [name: 'note_completed_after_created']
   }
 
   Note: '''
@@ -158,7 +159,11 @@ Enum note_category {
 Ref: property.agent_id > agent.id [delete: restrict]
 
 // SET NULL: the property outlives the tenancy ending.
-Ref: property.family_id - family.id [delete: set null]
+// One-to-one because property.family_id is UNIQUE (a family occupies at
+// most one current property). DBML reads the SECOND column of a `-` Ref as
+// the foreign key, so family.id must come first - reversed, this would
+// make family.id reference property.family_id instead.
+Ref: family.id - property.family_id [delete: set null]
 
 // CASCADE: tenants have no meaning without their family.
 Ref: tenant.family_id > family.id [delete: cascade]
