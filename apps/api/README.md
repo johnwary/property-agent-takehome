@@ -38,16 +38,19 @@ curl -s -X POST http://localhost:3001/agents \
   }'
 ```
 
-`201` with the created agent, `400` with `{ error, issues: [{field, message}] }`
-on invalid input, `409` if the email is already taken.
+`201` with the created agent and an `ETag` (always `"1"`), `400` with
+`{ error, issues: [{field, message}] }` on invalid input, `409` if the email is
+already taken.
 
 ### `PUT /agents/:id` - update
 
-Used by the web form. Full replace of the writable fields; `id` is in the URL.
+Full replace of the writable fields; `id` is in the URL. **Requires `If-Match`**
+with the ETag you loaded - see [Optimistic concurrency](#optimistic-concurrency).
 
 ```bash
-curl -s -X PUT http://localhost:3001/agents/<id> \
+curl -s -i -X PUT http://localhost:3001/agents/<id> \
   -H 'content-type: application/json' \
+  -H 'if-match: "1"' \
   -d '{
     "firstName": "Ada",
     "lastName": "King",
@@ -56,7 +59,8 @@ curl -s -X PUT http://localhost:3001/agents/<id> \
   }'
 ```
 
-`200` with the updated agent, `404` if `id` doesn't exist, `400`/`409` as above.
+`200` with the updated agent and a new `ETag`, `404` if `id` doesn't exist,
+`400`/`409` as above, and `412`/`428` per the table below.
 
 ### `GET /agents` - list all
 
@@ -64,23 +68,147 @@ curl -s -X PUT http://localhost:3001/agents/<id> \
 curl -s http://localhost:3001/agents
 ```
 
-`200` with a JSON array (empty array if none exist).
+`200` with a JSON array (empty array if none exist). No `ETag`: a write token
+belongs to one agent, so clients take it from `POST` or `GET /agents/:id`.
 
 ### `GET /agents/:id` - get one
 
 ```bash
-curl -s http://localhost:3001/agents/<id>
+curl -s -i http://localhost:3001/agents/<id>
 ```
 
-`200` with the agent, `404` if `id` doesn't exist.
+`200` with the agent and its `ETag`, `404` if `id` doesn't exist. This is where
+an editing client gets the ETag it must send back when saving.
 
 ### `DELETE /agents/:id` - delete
 
+Also requires `If-Match`, so a delete can't race an edit it never saw.
+
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE http://localhost:3001/agents/<id>
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X DELETE http://localhost:3001/agents/<id> \
+  -H 'if-match: "1"'
 ```
 
-`204` on success, `404` if `id` doesn't exist.
+`204` on success, `404` if `id` doesn't exist, `412`/`428` per the table below.
+
+## Optimistic concurrency
+
+Two people open the same agent, one saves, then the other saves from a copy
+that no longer reflects reality. Without a check the second save silently
+overwrites the first. Every agent therefore carries a server-owned revision,
+exposed as a strong `ETag`, and `PUT`/`DELETE` must say which revision they
+believe they are changing.
+
+```bash
+# 1. Create, and keep the ETag.
+curl -s -i -X POST http://localhost:3001/agents \
+  -H 'content-type: application/json' \
+  -d '{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","mobileNumber":"+61412345678"}'
+# HTTP/1.1 201 Created
+# ETag: "1"
+
+# 2. Or read it back later.
+curl -s -i http://localhost:3001/agents/<id>    # ETag: "1"
+
+# 3. Save with the ETag you loaded. The revision advances.
+curl -s -i -X PUT http://localhost:3001/agents/<id> \
+  -H 'content-type: application/json' -H 'if-match: "1"' \
+  -d '{"firstName":"Ada","lastName":"King","email":"ada@example.com","mobileNumber":"+61412345678"}'
+# HTTP/1.1 200 OK
+# ETag: "2"
+
+# 4. A second client still holding "1" is refused instead of overwriting.
+curl -s -i -X PUT http://localhost:3001/agents/<id> \
+  -H 'content-type: application/json' -H 'if-match: "1"' \
+  -d '{"firstName":"Ada","lastName":"Lovelace","email":"ada@example.com","mobileNumber":"+61499999999"}'
+# HTTP/1.1 412 Precondition Failed
+# {"error":"If-Match did not match the agent's current ETag; reload it and reapply your changes"}
+
+# 5. Delete needs the current ETag too.
+curl -s -i -X DELETE http://localhost:3001/agents/<id> -H 'if-match: "2"'   # 204
+```
+
+The failure responses:
+
+```bash
+# Missing header: the client didn't fail a check, it omitted one.
+curl -s -X PUT http://localhost:3001/agents/<id> \
+  -H 'content-type: application/json' -d '{...}'
+# 428 {"error":"If-Match header is required; GET the agent to obtain its ETag"}
+
+# Unquoted, so not a valid entity-tag - bad syntax, not a failed match.
+curl -s -X PUT http://localhost:3001/agents/<id> \
+  -H 'content-type: application/json' -H 'if-match: 1' -d '{...}'
+# 400 {"error":"If-Match must be \"*\" or a list of quoted entity-tags, e.g. If-Match: \"1\""}
+
+# Valid syntax, wrong tag.
+curl -s -X PUT http://localhost:3001/agents/<id> \
+  -H 'content-type: application/json' -H 'if-match: "99"' -d '{...}'
+# 412
+```
+
+### Header rules
+
+`If-Match` is read per
+[RFC 9110 section 13.1.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1).
+
+| Header | Result |
+| --- | --- |
+| absent | `428` |
+| `1`, `"1`, `W/1`, `" 1"`, `"1" "2"` | `400` - not a valid entity-tag list |
+| `"1"` when the agent is at revision 1 | applied |
+| `"99"`, `"abc"`, `""` | `412` - valid tags, none of them current |
+| `W/"1"` | `412` - weak tags never match strongly |
+| `"abc", "a,b", "1"` | applied if any strong member matches |
+| `*` | applied if the agent exists |
+| `"1", *` | `400` - `*` is an alternative to a list, not a member |
+
+Details worth knowing:
+
+- **Strong comparison only.** A weak tag (`W/"1"`) is valid syntax but can
+  never match, so it gets `412`. The `W/` prefix is not stripped.
+- **Tags are opaque.** `"abc"` is a perfectly valid tag that simply isn't
+  current. This server happens to put an integer inside the quotes; clients
+  should echo back the bytes they received and not construct tags themselves.
+  `"01"` and `"1"` are different tags even though the numbers are equal.
+- **Lists are parsed, not split on commas.** A quoted tag may contain a comma,
+  so `"a,b"` is one tag. Optional whitespace around members is accepted.
+- **`*` checks existence only** and bypasses the revision check entirely. It
+  suits "delete whatever is there now" scripts. An ordinary editing client must
+  send the specific ETag it loaded, or it is back to overwriting unseen edits.
+- **A no-op `PUT` still advances the revision**, because it is still an
+  accepted write. A client cannot replay the same `If-Match` twice.
+- **Revision is never in the JSON.** The `Agent` shape is unchanged, and a
+  `revision` field in a request body is ignored - clients cannot forge it.
+- **Failed writes change nothing.** A `412` or `409` leaves both the fields and
+  the revision as they were, so the ETag a client already holds stays valid.
+- **An empty value reads as absent** (`428`, not `400`). An empty or
+  whitespace-only header is rejected as malformed where it reaches the server,
+  but HTTP clients strip it before sending, leaving nothing to distinguish from
+  a header that was never set.
+
+### Client contract
+
+`If-Match` on `PUT`/`DELETE` is required, so this is a breaking change for any
+client that saved unconditionally. A client must now:
+
+1. Keep the `ETag` from the `POST` or `GET /agents/:id` that loaded the agent.
+2. Send it as `If-Match` when saving or deleting.
+3. Replace its stored ETag with the one on the `200` response.
+4. Treat `412` as "someone else changed this", not as a validation error.
+
+**`apps/web` has not been updated yet, so its edit form's saves currently get
+`428`.** The UI is not protected against lost updates; the API is. The
+remaining integration work:
+
+- Store the `ETag` alongside the loaded agent, and send it as `If-Match` on save.
+- On `412`, **do not discard what the user typed.** Show that the agent changed
+  underneath them and offer to reload the current version, so they can compare
+  and reapply. Silently refetching and resubmitting would recreate the very
+  lost update this feature prevents.
+- Refresh the stored ETag from each successful save, so a second edit in the
+  same session doesn't fail with a spent tag.
 
 ## Error handling
 
@@ -88,10 +216,26 @@ All errors are JSON: `{ error: string, issues?: [{field, message}] }`.
 
 | Status | Cause |
 | --- | --- |
-| `400` | validation failed, or the request body is malformed JSON |
+| `400` | validation failed, malformed JSON body, or malformed `If-Match` |
 | `404` | no agent with that `id` |
 | `409` | email already used by another agent |
+| `412` | `If-Match` didn't match the agent's current ETag (stale or weak tag) |
+| `428` | `If-Match` missing (or sent with an empty value) on `PUT`/`DELETE` |
 | `500` | unexpected server error |
+
+Precedence when more than one thing is wrong, following
+[RFC 9110 section 13.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.2)
+(ordinary request checks before preconditions):
+
+1. `400` malformed JSON body
+2. `400` validation failed - an invalid body is rejected whatever `If-Match` says
+3. `428` absent `If-Match`, or `400` if present but malformed - either way the
+   header is dealt with before the store is consulted, since a header that
+   isn't valid syntax can't be compared at all
+4. `404` unknown `id`
+5. `412` failed precondition - checked before the duplicate-email rule, so a
+   stale client is told to reload rather than to fix a conflict it can't see
+6. `409` duplicate email
 
 Validation mirrors the CHECK constraints in [`docs/schema.sql`](../../docs/schema.sql) -
 the same rules agreed on paper are enforced here, since there's no database to
@@ -104,4 +248,6 @@ pnpm --filter @property-agent/api test
 ```
 
 Drives real HTTP requests against the app on an ephemeral port - no handler
-calls, no mocks.
+calls, no mocks. Conditional requests are covered end to end, including ETag
+issuing, stale writes, header syntax, weak tags, lists, wildcard, and error
+precedence.
