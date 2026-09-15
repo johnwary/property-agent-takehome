@@ -16,6 +16,14 @@ Table agent {
   created_at    timestamptz [not null, default: `now()`]
   updated_at    timestamptz [not null, default: `now()`]
 
+  checks {
+    `char_length(btrim(first_name)) > 0` [name: 'agent_first_name_not_blank']
+    `char_length(btrim(last_name)) > 0`  [name: 'agent_last_name_not_blank']
+    `email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'` [name: 'agent_email_shape']
+    `mobile_number ~ '^\+[1-9][0-9]{7,14}$'` [name: 'agent_mobile_e164']
+    `updated_at >= created_at` [name: 'agent_updated_after_created']
+  }
+
   Note: 'A property agent. The only entity exposed by the REST API in this exercise.'
 }
 
@@ -25,17 +33,25 @@ Table family {
   created_at timestamptz [not null, default: `now()`]
   updated_at timestamptz [not null, default: `now()`]
 
+  checks {
+    `char_length(btrim(name)) > 0` [name: 'family_name_not_blank']
+  }
+
   Note: '''
   The leaseholding household. Exists as its own entity so that
   "all tenants of a property belong to a single family" is enforced by
   structure rather than by a trigger or application check.
+
+  Scope assumption beyond the brief: a family is the household occupying
+  ONE current rental property, enforced by UNIQUE (property.family_id).
+  Tenancy history is out of scope - see README "Known limitations".
   '''
 }
 
 Table property {
   id            uuid         [pk]
-  agent_id      uuid         [not null, ref: > agent.id]
-  family_id     uuid         [ref: > family.id, note: 'NULL while vacant']
+  agent_id      uuid         [not null]
+  family_id     uuid         [unique, note: 'NULL while vacant; UNIQUE = one current property per family']
   address_line1 varchar(160) [not null]
   address_line2 varchar(160)
   suburb        varchar(80)  [not null]
@@ -47,18 +63,22 @@ Table property {
 
   Indexes {
     agent_id
-    family_id
+  }
+
+  checks {
+    `char_length(btrim(address_line1)) > 0` [name: 'property_address_not_blank']
   }
 
   Note: '''
   A rental property managed by exactly one agent.
   family_id is nullable: a property between tenancies has no family.
+  Several properties may be vacant at once - UNIQUE treats NULLs as distinct.
   '''
 }
 
 Table tenant {
   id            uuid        [pk]
-  family_id     uuid        [not null, ref: > family.id]
+  family_id     uuid        [not null]
   first_name    varchar(80) [not null]
   last_name     varchar(80) [not null]
   email         citext      [unique, note: 'optional; unique when present']
@@ -69,16 +89,31 @@ Table tenant {
 
   Indexes {
     family_id
-    (family_id, is_primary) [unique, name: 'one_primary_tenant_per_family', note: 'partial: WHERE is_primary']
   }
 
-  Note: 'A person on the lease. Belongs to exactly one family.'
+  checks {
+    `char_length(btrim(first_name)) > 0` [name: 'tenant_first_name_not_blank']
+    `char_length(btrim(last_name)) > 0`  [name: 'tenant_last_name_not_blank']
+  }
+
+  Note: '''
+  A person on the lease. Belongs to exactly one family, which may hold
+  any number of tenants.
+
+  NOT EXPRESSIBLE IN DBML - see schema.sql:
+    CREATE UNIQUE INDEX one_primary_tenant_per_family
+      ON tenant (family_id) WHERE is_primary;
+
+  A partial unique index allows at most one primary contact per family.
+  It must not be written as UNIQUE (family_id, is_primary): that is valid
+  SQL but caps a family at two tenants, contradicting "1 or more tenants".
+  '''
 }
 
 Table note {
   id           uuid         [pk]
-  agent_id     uuid         [not null, ref: > agent.id, note: 'author']
-  property_id  uuid         [ref: > property.id, note: 'NULL = general note, not property-specific']
+  agent_id     uuid         [not null, note: 'author']
+  property_id  uuid         [note: 'NULL = general note, not property-specific']
   category     note_category[not null, default: 'general']
   body         text         [not null, note: 'non-empty']
   due_at       timestamptz  [note: 'set => this note is a reminder']
@@ -89,12 +124,20 @@ Table note {
   Indexes {
     agent_id
     property_id
-    (agent_id, due_at) [name: 'agent_reminder_queue', note: 'partial: WHERE due_at IS NOT NULL AND completed_at IS NULL']
+  }
+
+  checks {
+    `char_length(btrim(body)) > 0` [name: 'note_body_not_blank']
+    `completed_at IS NULL OR due_at IS NOT NULL` [name: 'note_completed_requires_due']
   }
 
   Note: '''
   Notes and reminders share one table. A reminder is a note that has a
   due_at. completed_at may only be set when due_at is set.
+
+  NOT EXPRESSIBLE IN DBML - see schema.sql, the outstanding-reminder queue:
+    CREATE INDEX agent_reminder_queue ON note (agent_id, due_at)
+      WHERE due_at IS NOT NULL AND completed_at IS NULL;
   '''
 }
 
@@ -105,3 +148,23 @@ Enum note_category {
   inspection
   compliance
 }
+
+// ---------------------------------------------------------------------------
+// Relationships. Declared standalone so each carries its ON DELETE action.
+// ---------------------------------------------------------------------------
+
+// RESTRICT: an agent holding properties cannot be deleted. Cascading would
+// destroy a portfolio; SET NULL would orphan it. Reassignment must be explicit.
+Ref: property.agent_id > agent.id [delete: restrict]
+
+// SET NULL: the property outlives the tenancy ending.
+Ref: property.family_id - family.id [delete: set null]
+
+// CASCADE: tenants have no meaning without their family.
+Ref: tenant.family_id > family.id [delete: cascade]
+
+// RESTRICT: preserve authorship.
+Ref: note.agent_id > agent.id [delete: restrict]
+
+// CASCADE: property-specific notes die with the property.
+Ref: note.property_id > property.id [delete: cascade]

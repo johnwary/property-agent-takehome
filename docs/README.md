@@ -5,8 +5,30 @@ property is leased to a single **family**, which has one or more **tenants**.
 An agent writes **notes and reminders** against a property to drive actions
 such as maintenance or pest control.
 
-Source of truth for this diagram is [`data-model.dbml`](./data-model.dbml),
-renderable at [dbdiagram.io](https://dbdiagram.io).
+[`schema.sql`](./schema.sql) is the authoritative definition. The diagram and
+prose below explain it; [`verify.sql`](./verify.sql) proves it behaves as
+documented. [`data-model.dbml`](./data-model.dbml) renders the same model at
+[dbdiagram.io](https://dbdiagram.io).
+
+The application stores data in memory as the brief requires - PostgreSQL is
+used only to make this model executable, and is not needed to run the API or
+the web client.
+
+## Verifying the model
+
+```bash
+docker run -d --name pg-verify -e POSTGRES_PASSWORD=verify \
+  -e POSTGRES_DB=verify -p 55432:5432 postgres:16-alpine
+
+PGPASSWORD=verify psql -h localhost -p 55432 -U postgres -d verify \
+  -v ON_ERROR_STOP=1 -f docs/schema.sql -f docs/verify.sql
+
+docker rm -f pg-verify
+```
+
+Any PostgreSQL 14+ connection works; Docker is a convenience. Fixtures run in
+a transaction that is rolled back, so nothing persists. A failed assertion
+exits non-zero.
 
 ## Diagram
 
@@ -14,9 +36,9 @@ renderable at [dbdiagram.io](https://dbdiagram.io).
 erDiagram
     AGENT ||--o{ PROPERTY : "manages"
     AGENT ||--o{ NOTE : "writes"
-    FAMILY ||--o{ TENANT : "consists of"
-    FAMILY ||--o| PROPERTY : "leases"
-    PROPERTY ||--o{ NOTE : "is subject of"
+    FAMILY ||--|{ TENANT : "consists of"
+    FAMILY |o--o| PROPERTY : "occupies"
+    PROPERTY |o--o{ NOTE : "is subject of"
 
     AGENT {
         uuid id PK
@@ -79,15 +101,32 @@ erDiagram
 | From | To | Cardinality | Rule |
 | --- | --- | --- | --- |
 | `agent` | `property` | 1 : 0..N | A property is managed by exactly one agent; an agent may manage none or many. |
-| `family` | `property` | 0..1 : 0..1 | A leased property references exactly one family. Vacant property has `family_id IS NULL`. |
-| `family` | `tenant` | 1 : 1..N | A tenant belongs to exactly one family. A family is expected to have at least one tenant. |
+| `family` | `property` | 0..1 : 0..1 | A leased property references exactly one family, and a family occupies at most one current property (`UNIQUE (property.family_id)`). A vacant property has `family_id IS NULL`; several may be vacant at once, since `UNIQUE` treats NULLs as distinct. |
+| `family` | `tenant` | 1 : 0..N enforced, 1..N intended | A tenant belongs to exactly one family. The schema cannot require a family to have a tenant - see "What the schema does and does not guarantee". |
 | `agent` | `note` | 1 : 0..N | Every note has exactly one authoring agent. |
-| `property` | `note` | 0..1 : 0..N | A note may target a property, or be a general agent note. |
+| `property` | `note` | 0..1 : 0..N | A note may target a property, or be a general agent note (`property_id IS NULL`). |
 
-The requirement *"each property has 1 or more tenants belonging to a single
-family"* is satisfied structurally: tenants attach to a **family**, and a
-property references **one** family. There is no path by which a property can
-reach two families, so no check constraint or trigger is needed.
+### What the schema does and does not guarantee
+
+The requirement is *"each property has 1 or more tenants belonging to a single
+family."* Those are two separate claims, and the schema enforces only one.
+
+**Guaranteed by structure - a single family.** Tenants attach to a family, and
+a property holds one nullable `family_id`. There is no path by which a property
+reaches two families, so no check constraint or trigger is needed. A family may
+hold any number of tenants; a partial unique index limits only how many of them
+are the *primary* contact.
+
+**Left to the application - at least one tenant.** Nothing stops an empty
+`family` row, and `property.family_id` may be NULL. Enforcing a minimum child
+count needs a deferred constraint or a trigger, both of which make ordinary
+inserts awkward. It belongs at the application's transaction boundary: create a
+family together with its first tenant, and refuse to remove the last tenant of
+an occupied property.
+
+**Assumption beyond the brief - vacancy.** The brief implies every property has
+tenants. `family_id` is nullable anyway, because real properties sit empty
+between tenancies. This is a deliberate extension, not an oversight.
 
 ## Constraints
 
@@ -98,7 +137,20 @@ reach two families, so no check constraint or trigger is needed.
 | all | `id` | PRIMARY KEY (uuid) |
 | `agent` | `email` | UNIQUE, case-insensitive (`citext`) |
 | `tenant` | `email` | UNIQUE where NOT NULL |
-| `tenant` | `(family_id) WHERE is_primary` | UNIQUE partial - at most one primary contact per family |
+| `property` | `family_id` | UNIQUE - a family occupies at most one current property |
+| `tenant` | `(family_id) WHERE is_primary` | partial unique **index** - at most one primary contact per family |
+
+The primary-contact rule must be a partial unique *index*; PostgreSQL has no
+`WHERE` clause on table constraints:
+
+```sql
+CREATE UNIQUE INDEX one_primary_tenant_per_family
+  ON tenant (family_id) WHERE is_primary;
+```
+
+Writing it as `UNIQUE (family_id, is_primary)` is valid SQL and silently wrong:
+it permits one `true` row and one `false` row, capping a family at two tenants
+and contradicting "1 or more tenants". `verify.sql` covers this case.
 
 ### Referential integrity
 
@@ -146,23 +198,25 @@ CREATE INDEX agent_reminder_queue ON note (agent_id, due_at)
 
 Deliberate simplifications, given the scope and time box:
 
-1. **No tenancy history.** `property.family_id` records who lives there *now*.
-   A property re-let to a new family loses the previous tenancy. Modelling it
-   properly means a `lease` table (`property_id`, `family_id`, `starts_on`,
-   `ends_on`, `rent_amount`) with an exclusion constraint preventing
-   overlapping active leases for one property. That is the correct model for a
-   real letting business and the first change I would make.
+1. **No tenancy history.** `property.family_id` records who lives there *now*,
+   and `UNIQUE` on it encodes the assumption that a family occupies one current
+   property. A property re-let to a new family loses the previous tenancy.
+   Modelling it properly means a `lease` table (`property_id`, `family_id`,
+   `starts_on`, `ends_on`, `rent_amount`) with an exclusion constraint
+   preventing overlapping active leases for one property. That is the correct
+   model for a real letting business and the first change I would make.
 
 2. **No agent assignment history.** `property.agent_id` is a simple FK, so a
    property that changes agent loses the record of who managed it before. The
    fix mirrors the above: a `property_agent_assignment` table with a date range.
 
-3. **"At least one tenant per family" is not enforced by the schema.** A
-   `family` row can be inserted before its tenants exist. Enforcing a minimum
-   child count requires a deferred constraint or a trigger, both of which make
-   ordinary inserts awkward. It belongs in the application's transaction
-   boundary: create the family and its first tenant together, or not at all.
-
-4. **No soft delete.** Deleting is permanent. For a system of record holding
+3. **No soft delete.** Deleting is permanent. For a system of record holding
    tenancy data, a `deleted_at` column and filtered reads would be the
    production choice.
+
+## Notes on the DBML
+
+`data-model.dbml` encodes the tables, columns, checks, uniqueness and
+`ON DELETE` actions. DBML has no syntax for **partial** indexes, so the
+primary-contact index and the outstanding-reminder queue appear there as
+labelled notes and are defined for real in `schema.sql`.
