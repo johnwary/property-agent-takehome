@@ -5,8 +5,11 @@
 --
 --   psql -v ON_ERROR_STOP=1 -f docs/schema.sql -f docs/verify.sql
 --
--- ON_ERROR_STOP=1 makes a failed assertion exit non-zero. All fixtures run
--- inside a transaction that is rolled back, so the database is left untouched.
+-- ON_ERROR_STOP=1 makes a failed assertion exit non-zero. This file's own
+-- fixtures run inside a transaction that is rolled back, so THIS file leaves
+-- no row data behind. schema.sql, run first, is not so gentle - it drops and
+-- recreates every table and commits that. Only ever point this pair at the
+-- disposable container in docs/README.md "Verifying the model".
 
 \set ON_ERROR_STOP on
 \timing off
@@ -114,12 +117,27 @@ SELECT assert_rejects($$
   DELETE FROM agent WHERE id = '11111111-1111-1111-1111-111111111111'
 $$, 'property_agent_fk');
 
--- RESTRICT: an agent who authored notes cannot be deleted.
 INSERT INTO note (id, agent_id, property_id, category, body, due_at) VALUES
   ('55555555-5555-5555-5555-555555555555',
    '11111111-1111-1111-1111-111111111111',
    '44444444-4444-4444-4444-444444444444',
    'pest_control', 'Quarterly pest inspection due.', now() + interval '30 days');
+
+-- RESTRICT: an agent who authored notes cannot be deleted. A second agent
+-- with no properties isolates this from the property_agent_fk check above -
+-- agent 111 owns both properties and notes, so deleting it would be
+-- rejected by whichever FK psql checks first, proving nothing about notes.
+INSERT INTO agent (id, first_name, last_name, email, mobile_number) VALUES
+  ('77777777-7777-7777-7777-777777777777', 'Grace', 'Hopper',
+   'grace@example.com', '+61412345679');
+
+INSERT INTO note (id, agent_id, body) VALUES
+  ('88888888-8888-8888-8888-888888888888',
+   '77777777-7777-7777-7777-777777777777', 'General note, no property.');
+
+SELECT assert_rejects($$
+  DELETE FROM agent WHERE id = '77777777-7777-7777-7777-777777777777'
+$$, 'note_agent_fk');
 
 -- CASCADE: property-specific notes die with the property.
 DELETE FROM property WHERE id = '44444444-4444-4444-4444-444444444444';
@@ -136,11 +154,32 @@ INSERT INTO property (id, agent_id, family_id, address_line1, suburb, state, pos
    '33333333-3333-3333-3333-333333333333',
    '5 Lonsdale St', 'Melbourne', 'VIC', '3000');
 
+-- Give this family tenants too, so the cascade below has rows to remove -
+-- a family with none would make that assertion pass vacuously.
+INSERT INTO tenant (family_id, first_name, last_name, is_primary) VALUES
+  ('33333333-3333-3333-3333-333333333333', 'Jo',   'Smith', true),
+  ('33333333-3333-3333-3333-333333333333', 'Alex', 'Smith', false);
+
+SELECT assert(
+  (SELECT count(*) FROM tenant
+    WHERE family_id = '33333333-3333-3333-3333-333333333333') = 2,
+  'the Smith family holds two tenants before deletion');
+
 DELETE FROM family WHERE id = '33333333-3333-3333-3333-333333333333';
+
+-- The property row must still exist (not cascaded away) with its family
+-- link nulled. A scalar subquery on a missing row also returns NULL, so a
+-- bare "IS NULL" check on family_id alone cannot tell "nulled" from "gone" -
+-- assert the row's existence and its family_id separately.
+SELECT assert(
+  (SELECT count(*) FROM property
+    WHERE id = '66666666-6666-6666-6666-666666666666') = 1,
+  'the property row survives its family being deleted');
+
 SELECT assert(
   (SELECT family_id FROM property
     WHERE id = '66666666-6666-6666-6666-666666666666') IS NULL,
-  'deleting a family nulls the property link, property survives');
+  'deleting a family nulls the surviving property''s family_id');
 
 -- CASCADE: a family's tenants go with it.
 SELECT assert(
