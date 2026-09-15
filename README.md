@@ -18,7 +18,10 @@ Node >= 20, pnpm >= 9.
 
 ```bash
 pnpm install
-pnpm dev
+pnpm dev   # runs apps/api on :3001 and apps/web on :5173 together
 ```
 
-More detail lands as the app is built.
+Then open http://localhost:5173 for the form, or see
+[`apps/api/README.md`](apps/api/README.md) for the curl requests the brief
+asks for (list, get-one, delete). [`apps/web/README.md`](apps/web/README.md)
+covers the client. [`docs/README.md`](docs/README.md) covers the data model.
