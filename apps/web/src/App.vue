@@ -14,7 +14,7 @@ const FIELD_LABELS: Record<keyof AgentInput, string> = {
 };
 
 // Upsert: blank id -> POST (create), filled id -> PUT (update). Per the
-// brief, list/get/delete are curl-only (see apps/api/README.md) - this form
+// brief, list/delete stay curl-only (see apps/api/README.md) - this form
 // only creates and updates, so it needs the target id typed in by hand for
 // an update rather than a picker sourced from a list endpoint the UI never calls.
 const id = ref("");
@@ -25,6 +25,12 @@ const form = reactive<AgentInput>({
   mobileNumber: "",
 });
 
+// The ETag for `id`, so PUT can send If-Match without the form ever
+// exposing a "revision" field to edit or forge. Keyed by id (not just held
+// as a bare string) so switching to a different id can't accidentally reuse
+// a stale tag from whichever agent was loaded before it.
+const knownETags = reactive<Record<string, string>>({});
+
 // isSubmitting gates the button and guards against a second request firing
 // mid-flight; status only picks which message to render. Keeping them
 // separate matters because resetMessages() runs on every keystroke in the
@@ -32,18 +38,52 @@ const form = reactive<AgentInput>({
 // request was in flight would re-enable the button, let a second request
 // start, and whichever response lands second would silently overwrite the
 // first one's result.
-type Status = "idle" | "success" | "error";
+type Status = "idle" | "success" | "error" | "conflict";
 const status = ref<Status>("idle");
 const isSubmitting = ref(false);
 const fieldErrors = ref<Partial<Record<keyof AgentInput, string>>>({});
 const formError = ref("");
 const savedAgent = ref<Agent | null>(null);
+// Set only after a 412, by reloadAfterConflict(), so the user can compare
+// the version that beat them against what they still have typed above.
+const currentOnServer = ref<Agent | null>(null);
 
 function resetMessages() {
   status.value = "idle";
   fieldErrors.value = {};
   formError.value = "";
   savedAgent.value = null;
+  currentOnServer.value = null;
+}
+
+/**
+ * GETs the agent to learn its current ETag - needed the first time this
+ * form edits an id it did not itself just create or update, since If-Match
+ * has no value to send otherwise. Returns null (and reports 404 like any
+ * other failure) if the id doesn't exist.
+ */
+async function fetchETag(agentId: string): Promise<string | null> {
+  const res = await fetch(`/agents/${agentId}`);
+  if (!res.ok) return null;
+  const etag = res.headers.get("etag");
+  if (etag) knownETags[agentId] = etag;
+  return etag;
+}
+
+/**
+ * Reload the agent the user was trying to save, without touching what they
+ * typed - a 412 means someone else's edit is now current, and the form's
+ * job is to show that and let the user compare, not to silently discard
+ * their in-progress changes by refetching over the top of the form fields.
+ */
+async function reloadAfterConflict() {
+  const agentId = id.value.trim();
+  if (!agentId) return;
+  const res = await fetch(`/agents/${agentId}`);
+  if (!res.ok) return;
+  const etag = res.headers.get("etag");
+  if (etag) knownETags[agentId] = etag;
+  currentOnServer.value = (await res.json()) as Agent;
 }
 
 async function submit() {
@@ -52,21 +92,61 @@ async function submit() {
   fieldErrors.value = {};
   formError.value = "";
   savedAgent.value = null;
+  currentOnServer.value = null;
 
-  const isUpdate = id.value.trim().length > 0;
-  const url = isUpdate ? `/agents/${id.value.trim()}` : "/agents";
-  const method = isUpdate ? "PUT" : "POST";
+  const agentId = id.value.trim();
+  const isUpdate = agentId.length > 0;
 
   try {
-    const res = await fetch(url, {
-      method,
-      headers: { "content-type": "application/json" },
+    // PUT requires If-Match (see apps/api/README.md "Optimistic
+    // concurrency"). This form only ever learns an id's ETag from its own
+    // prior create/update in this session, so the first time it edits an id
+    // it didn't just save itself - pasted in by hand - there is nothing
+    // cached yet. One GET fills that in; a missing agent surfaces as the
+    // same 404 the PUT would have given anyway.
+    let ifMatch: string | undefined;
+    if (isUpdate) {
+      ifMatch = knownETags[agentId];
+      if (!ifMatch) {
+        const fetched = await fetchETag(agentId);
+        if (!fetched) {
+          status.value = "error";
+          formError.value = "agent not found";
+          return;
+        }
+        ifMatch = fetched;
+      }
+    }
+
+    const res = await fetch(isUpdate ? `/agents/${agentId}` : "/agents", {
+      method: isUpdate ? "PUT" : "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(ifMatch ? { "if-match": ifMatch } : {}),
+      },
       body: JSON.stringify(form),
     });
 
     if (res.ok) {
-      savedAgent.value = (await res.json()) as Agent;
+      const saved = (await res.json()) as Agent;
+      const nextETag = res.headers.get("etag");
+      // Refresh the cached tag from this response, not the one that was
+      // just spent - a second save in the same session must send the
+      // revision this write produced, or it fails as if it were stale.
+      if (nextETag) knownETags[saved.id] = nextETag;
+      savedAgent.value = saved;
       status.value = "success";
+      return;
+    }
+
+    if (res.status === 412) {
+      // Someone else's write landed first. The cached tag is now wrong for
+      // every future save too, not just this one - drop it so the next
+      // attempt (after the user reloads and reapplies) re-fetches instead
+      // of retrying the same stale value.
+      delete knownETags[agentId];
+      status.value = "conflict";
+      formError.value = "This agent was changed by someone else since you loaded it.";
       return;
     }
 
@@ -176,6 +256,16 @@ async function submit() {
 
     <p v-if="status === 'error' && formError" class="form-error" role="alert">{{ formError }}</p>
 
+    <div v-if="status === 'conflict'" class="conflict" role="alert">
+      <p>{{ formError }}</p>
+      <p>
+        What you typed above is untouched. Reload to see the current version, then
+        reapply your changes and save again.
+      </p>
+      <button type="button" @click="reloadAfterConflict">Reload current version</button>
+      <pre v-if="currentOnServer">{{ JSON.stringify(currentOnServer, null, 2) }}</pre>
+    </div>
+
     <div v-if="status === 'success' && savedAgent" class="success" role="status">
       <p>Saved.</p>
       <pre>{{ JSON.stringify(savedAgent, null, 2) }}</pre>
@@ -245,6 +335,33 @@ button:disabled {
 .form-error {
   color: #b00020;
   margin-top: 1rem;
+}
+
+.conflict {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #b06b00;
+  border-radius: 4px;
+  background: #fff8ec;
+}
+
+.conflict p {
+  margin: 0 0 0.5rem;
+}
+
+.conflict button {
+  padding: 0.4rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+
+.conflict pre {
+  margin-top: 0.75rem;
+  background: #f5f5f5;
+  padding: 0.75rem;
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.85rem;
 }
 
 .success {

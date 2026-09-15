@@ -205,17 +205,9 @@ client that saved unconditionally. A client must now:
 3. Replace its stored ETag with the one on the `200` response.
 4. Treat `412` as "someone else changed this", not as a validation error.
 
-**`apps/web` has not been updated yet, so its edit form's saves currently get
-`428`.** The UI is not protected against lost updates; the API is. The
-remaining integration work:
-
-- Store the `ETag` alongside the loaded agent, and send it as `If-Match` on save.
-- On `412`, **do not discard what the user typed.** Show that the agent changed
-  underneath them and offer to reload the current version, so they can compare
-  and reapply. Silently refetching and resubmitting would recreate the very
-  lost update this feature prevents.
-- Refresh the stored ETag from each successful save, so a second edit in the
-  same session doesn't fail with a spent tag.
+**`apps/web` implements this contract.** See
+[`apps/web/README.md`](../web/README.md#optimistic-concurrency) for how the
+form acquires, sends, and refreshes the `ETag`, and what it does on `412`.
 
 ## Error handling
 
