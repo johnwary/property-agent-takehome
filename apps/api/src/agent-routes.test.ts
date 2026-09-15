@@ -263,15 +263,32 @@ describe("optimistic concurrency (ETag / If-Match)", () => {
 
   it("400s a malformed If-Match on PUT and DELETE", async () => {
     const { id } = await createAgent();
-    // Unquoted, empty, unterminated, wildcard mixed into a list, and a bare
-    // comma are all invalid syntax rather than tags that fail to match.
+    // Unquoted, empty, unterminated, wildcard mixed into a list, and a
+    // comma-only list (no tag at all) are invalid syntax rather than tags
+    // that fail to match. A trailing comma after a real tag is NOT in this
+    // list - see the empty-list-element test below.
     // Note '" 1"': a space is not valid etagc (RFC 9110 8.8.3 lists %x21 and
     // %x23-7E, excluding SP), so it is bad syntax rather than a failed match.
-    for (const header of ["1", "", "   ", '"1', "W/1", '"1", *', ",", '"1",', "garbage", '"1" "2"', '" 1"', '"a b"']) {
+    for (const header of ["1", "", "   ", '"1', "W/1", '"1", *', ",", "garbage", '"1" "2"', '" 1"', '"a b"']) {
       expect((await put(id, validAgent, header)).status, `PUT If-Match: ${header}`).toBe(400);
       expect(await del(id, header), `DELETE If-Match: ${header}`).toBe(400);
     }
     expect((await get(id)).etag).toBe('"1"');
+  });
+
+  it("skips empty list elements around a real tag instead of rejecting them", async () => {
+    // RFC 9110 5.6.1.2: HTTP's #list grammar treats empty elements between,
+    // before, or after commas as nothing, not an error. A trailing comma
+    // after the current tag must still match - it did not before this fix.
+    // A fresh agent per header avoids the revision moving between cases.
+    const headers = ['"1",', ',"1"', '"1",,', '"1", ,'];
+    for (const [index, header] of headers.entries()) {
+      const email = `list-elem-${index}@example.com`;
+      const { id } = await createAgent({ ...validAgent, email });
+      const { status, etag } = await put(id, { ...validAgent, email, lastName: "King" }, header);
+      expect(status, `If-Match: ${JSON.stringify(header)}`).toBe(200);
+      expect(etag).toBe('"2"');
+    }
   });
 
   it("never strongly matches a weak tag", async () => {
@@ -355,15 +372,17 @@ describe("optimistic concurrency (ETag / If-Match)", () => {
       expect((await put("does-not-exist", validAgent)).status).toBe(428);
     });
 
-    it("reports a failed precondition before a duplicate email", async () => {
+    it("reports a duplicate email before a failed precondition", async () => {
       const { id, etag: stale } = await createAgent();
       await post({ ...validAgent, email: "second@example.com" });
       await put(id, { ...validAgent, lastName: "King" }, stale);
 
-      // A stale write is rejected without ever testing the email, so the
-      // client is told to reload rather than to fix a conflict it can't see.
+      // RFC 9110 13.2.1: a server MUST ignore preconditions if the same
+      // request without them would not have been 2xx or 412. An unconditional
+      // PUT with this email would be 409, so If-Match is never evaluated -
+      // the stale tag is irrelevant to a request that was already invalid.
       const { status } = await put(id, { ...validAgent, email: "second@example.com" }, stale);
-      expect(status).toBe(412);
+      expect(status).toBe(409);
     });
   });
 

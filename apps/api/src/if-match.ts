@@ -57,8 +57,15 @@ export function matchesStrongly(parsed: IfMatch, currentTag: string): boolean {
 /**
  * Splits a tag list on the commas that separate members, not on commas
  * inside a quoted tag: `"a,b"` is one tag, not two. Returns null if the
- * list is not well formed (unterminated quote, empty member, junk between
- * a closing quote and the next comma).
+ * list is not well formed (unterminated quote, or junk where a tag or a
+ * comma was expected).
+ *
+ * HTTP's list grammar (RFC 9110 5.6.1.2) is 1#element, defined via the
+ * generic #rule: empty elements between, before, or after commas are
+ * permitted and simply skipped, not an error - `"1",`, `,"1"` and `"1",,"2"`
+ * all mean the same one- or two-member list as `"1"` / `"1", "2"`. Only a
+ * comma-separated segment that is genuinely non-empty and still not a valid
+ * entity-tag is malformed.
  */
 function splitTagList(value: string): string[] | null {
   const members: string[] = [];
@@ -67,6 +74,14 @@ function splitTagList(value: string): string[] | null {
   while (index < value.length) {
     // OWS before a member.
     while (index < value.length && isSpace(value[index])) index++;
+
+    // Empty element: nothing before the next comma (or the end). Skip it -
+    // it is not a member, and it is not malformed.
+    if (index === value.length) break;
+    if (value[index] === ",") {
+      index++;
+      continue;
+    }
 
     const start = index;
     if (value.startsWith("W/", index)) index += 2;
@@ -84,9 +99,6 @@ function splitTagList(value: string): string[] | null {
     if (index === value.length) break;
     if (value[index] !== ",") return null;
     index++;
-    // A trailing comma leaves no further member, which is an empty list
-    // element rather than a valid tag.
-    if (value.slice(index).trim() === "") return null;
   }
 
   return members.length > 0 ? members : null;

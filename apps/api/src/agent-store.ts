@@ -69,9 +69,16 @@ export function createAgent(input: AgentInput): Agent {
  * Full replace of an existing agent's writable fields (PUT semantics), applied
  * only if `isCurrent` accepts the revision found at that moment.
  *
+ * The duplicate-email check runs before the precondition, not after. RFC 9110
+ * 13.2.1: a server MUST ignore preconditions if the same request without them
+ * would not have been a 2xx or a 412 - an unconditional PUT with this email
+ * would be 409, so If-Match is not even evaluated. A stale client with a
+ * colliding email must be told about the collision (409), not sent to reload
+ * for a conflict that exists independently of its stale copy.
+ *
  * The check and the write share one synchronous block with no await between
  * them, so a concurrent request cannot slip in after the comparison and before
- * the mutation. On any failure - stale revision or duplicate email - both the
+ * the mutation. On any failure - duplicate email or stale revision - both the
  * agent and its revision are left untouched.
  */
 export function updateAgent(
@@ -82,8 +89,8 @@ export function updateAgent(
   const existing = agents.get(id);
   const revision = revisions.get(id);
   if (!existing || revision === undefined) return { ok: false, reason: "not-found" };
-  if (!isCurrent(revision)) return { ok: false, reason: "precondition-failed" };
   if (emailTaken(input.email, id)) throw new DuplicateEmailError(input.email);
+  if (!isCurrent(revision)) return { ok: false, reason: "precondition-failed" };
 
   const updated: Agent = { ...existing, ...input, updatedAt: new Date().toISOString() };
   agents.set(id, updated);

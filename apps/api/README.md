@@ -129,22 +129,25 @@ curl -s -i -X PUT http://localhost:3001/agents/<id> \
 curl -s -i -X DELETE http://localhost:3001/agents/<id> -H 'if-match: "2"'   # 204
 ```
 
-The failure responses:
+The failure responses (each uses a real, valid body - these are If-Match
+failures, not body-validation ones):
 
 ```bash
+BODY='{"firstName":"Ada","lastName":"King","email":"ada@example.com","mobileNumber":"+61412345678"}'
+
 # Missing header: the client didn't fail a check, it omitted one.
 curl -s -X PUT http://localhost:3001/agents/<id> \
-  -H 'content-type: application/json' -d '{...}'
+  -H 'content-type: application/json' -d "$BODY"
 # 428 {"error":"If-Match header is required; GET the agent to obtain its ETag"}
 
 # Unquoted, so not a valid entity-tag - bad syntax, not a failed match.
 curl -s -X PUT http://localhost:3001/agents/<id> \
-  -H 'content-type: application/json' -H 'if-match: 1' -d '{...}'
+  -H 'content-type: application/json' -H 'if-match: 1' -d "$BODY"
 # 400 {"error":"If-Match must be \"*\" or a list of quoted entity-tags, e.g. If-Match: \"1\""}
 
 # Valid syntax, wrong tag.
 curl -s -X PUT http://localhost:3001/agents/<id> \
-  -H 'content-type: application/json' -H 'if-match: "99"' -d '{...}'
+  -H 'content-type: application/json' -H 'if-match: "99"' -d "$BODY"
 # 412
 ```
 
@@ -155,12 +158,14 @@ curl -s -X PUT http://localhost:3001/agents/<id> \
 
 | Header | Result |
 | --- | --- |
-| absent | `428` |
+| absent (header not sent) | `428` |
+| `""` (header sent, empty) | `400` - not the same as absent, see below |
 | `1`, `"1`, `W/1`, `" 1"`, `"1" "2"` | `400` - not a valid entity-tag list |
 | `"1"` when the agent is at revision 1 | applied |
-| `"99"`, `"abc"`, `""` | `412` - valid tags, none of them current |
+| `"99"`, `"abc"`, `""` (a quoted empty tag - not the same as an empty header) | `412` - valid tags, none of them current |
 | `W/"1"` | `412` - weak tags never match strongly |
 | `"abc", "a,b", "1"` | applied if any strong member matches |
+| `"1",`, `,"1"`, `"1",,"2"` | applied - empty list elements are skipped, not malformed |
 | `*` | applied if the agent exists |
 | `"1", *` | `400` - `*` is an alternative to a list, not a member |
 
@@ -183,10 +188,12 @@ Details worth knowing:
   `revision` field in a request body is ignored - clients cannot forge it.
 - **Failed writes change nothing.** A `412` or `409` leaves both the fields and
   the revision as they were, so the ETag a client already holds stays valid.
-- **An empty value reads as absent** (`428`, not `400`). An empty or
-  whitespace-only header is rejected as malformed where it reaches the server,
-  but HTTP clients strip it before sending, leaving nothing to distinguish from
-  a header that was never set.
+- **Absent and empty are different, and both are reachable.** No `If-Match`
+  header at all is `428`. An explicit empty value - `curl -H 'If-Match;'`
+  sends one - reaches the server as `""` and is `400`, the same as any other
+  unparseable value. Node's `req.header()` only returns `undefined` when the
+  header was never sent; it does not treat an empty value as absent, and
+  neither does this server.
 
 ### Client contract
 
@@ -220,22 +227,25 @@ All errors are JSON: `{ error: string, issues?: [{field, message}] }`.
 | `404` | no agent with that `id` |
 | `409` | email already used by another agent |
 | `412` | `If-Match` didn't match the agent's current ETag (stale or weak tag) |
-| `428` | `If-Match` missing (or sent with an empty value) on `PUT`/`DELETE` |
+| `428` | `If-Match` header not sent at all on `PUT`/`DELETE` |
 | `500` | unexpected server error |
 
 Precedence when more than one thing is wrong, following
-[RFC 9110 section 13.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.2)
-(ordinary request checks before preconditions):
+[RFC 9110 section 13.2.1](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.2.1)
+("a server MUST ignore preconditions if the same request without them would
+not have been a 2xx or a 412" - so anything that would fail on its own terms
+is decided before `If-Match` is even evaluated):
 
 1. `400` malformed JSON body
 2. `400` validation failed - an invalid body is rejected whatever `If-Match` says
-3. `428` absent `If-Match`, or `400` if present but malformed - either way the
-   header is dealt with before the store is consulted, since a header that
-   isn't valid syntax can't be compared at all
+3. `428` absent `If-Match`, or `400` if present but malformed (including an
+   explicit empty value, e.g. `curl -H 'If-Match;'`) - either way the header
+   is dealt with before the store is consulted, since a header that isn't
+   valid syntax can't be compared at all
 4. `404` unknown `id`
-5. `412` failed precondition - checked before the duplicate-email rule, so a
-   stale client is told to reload rather than to fix a conflict it can't see
-6. `409` duplicate email
+5. `409` duplicate email - an unconditional PUT with this email would already
+   be `409`, so per 13.2.1 the precondition is never evaluated for it
+6. `412` failed precondition
 
 Validation mirrors the CHECK constraints in [`docs/schema.sql`](../../docs/schema.sql) -
 the same rules agreed on paper are enforced here, since there's no database to
