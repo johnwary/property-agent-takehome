@@ -3,6 +3,14 @@ import { agentRouter } from "./agent-routes.js";
 
 export function createApp() {
   const app = express();
+
+  // This API issues its own ETags from each agent's server-owned revision
+  // (see agent-routes.ts), so Express's body-hash default is turned off. It
+  // would otherwise stamp an ETag on error bodies too, where a tag validating
+  // the error text could be mistaken for the agent's current one and sent
+  // back as If-Match. An explicit res.set("ETag", ...) still takes effect.
+  app.set("etag", false);
+
   app.use(express.json());
 
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
