@@ -4,8 +4,12 @@
 -- This file exists so the documented data model is executable rather than
 -- merely drawn: docs/verify.sql runs assertions against it.
 --
+-- DESTRUCTIVE: this file drops and recreates every table it defines, and
+-- commits that drop immediately. Run it only against the disposable
+-- container in docs/README.md "Verifying the model" - never against a
+-- database holding data you want to keep.
+--
 -- Target: PostgreSQL 14+.
---   psql -v ON_ERROR_STOP=1 -f docs/schema.sql
 
 BEGIN;
 
