@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { _resetStore } from "./agent-store.js";
 import type { Agent } from "./agent.js";
+import type { FieldIssue } from "./agent-validation.js";
 
 let server: Server;
 let baseUrl: string;
@@ -27,7 +28,7 @@ const validAgent = {
 
 // Loose shape covering both a successful Agent response and an error body
 // ({error, issues?}) - this file only reads whichever fields each test needs.
-type AgentResponse = Partial<Agent> & { error?: string; issues?: string[] };
+type AgentResponse = Partial<Agent> & { error?: string; issues?: FieldIssue[] };
 
 async function post(body: unknown): Promise<{ status: number; body: AgentResponse }> {
   const res = await fetch(`${baseUrl}/agents`, {
@@ -91,15 +92,15 @@ describe("agent CRUD", () => {
     expect(second.status).toBe(404);
   });
 
-  it("rejects a create with missing/invalid fields, listing every issue", async () => {
+  it("rejects a create with missing/invalid fields, one issue per field", async () => {
     const { status, body } = await post({ firstName: "", email: "not-an-email", mobileNumber: "0412 345 678" });
     expect(status).toBe(400);
     expect(body.issues).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("firstName"),
-        expect.stringContaining("lastName"),
-        expect.stringContaining("email"),
-        expect.stringContaining("mobileNumber"),
+        expect.objectContaining({ field: "firstName" }),
+        expect.objectContaining({ field: "lastName" }),
+        expect.objectContaining({ field: "email" }),
+        expect.objectContaining({ field: "mobileNumber" }),
       ]),
     );
   });

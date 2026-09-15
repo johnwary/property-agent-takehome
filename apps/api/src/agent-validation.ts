@@ -5,9 +5,14 @@ import type { AgentInput } from "./agent.js";
 const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const MOBILE_E164 = /^\+[1-9]\d{7,14}$/;
 
+export interface FieldIssue {
+  field: keyof AgentInput;
+  message: string;
+}
+
 export class ValidationError extends Error {
-  constructor(public readonly issues: string[]) {
-    super(issues.join("; "));
+  constructor(public readonly issues: FieldIssue[]) {
+    super(issues.map((i) => `${i.field}: ${i.message}`).join("; "));
     this.name = "ValidationError";
   }
 }
@@ -18,16 +23,18 @@ function isBlank(value: unknown): boolean {
 
 /** Throws ValidationError listing every violation, or returns a trimmed, typed input. */
 export function parseAgentInput(body: unknown): AgentInput {
-  const issues: string[] = [];
+  const issues: FieldIssue[] = [];
   const b = (body ?? {}) as Record<string, unknown>;
 
-  if (isBlank(b.firstName)) issues.push("firstName is required");
-  if (isBlank(b.lastName)) issues.push("lastName is required");
-  if (isBlank(b.email)) issues.push("email is required");
-  else if (!EMAIL_SHAPE.test((b.email as string).trim())) issues.push("email is not a valid address");
-  if (isBlank(b.mobileNumber)) issues.push("mobileNumber is required");
+  if (isBlank(b.firstName)) issues.push({ field: "firstName", message: "is required" });
+  if (isBlank(b.lastName)) issues.push({ field: "lastName", message: "is required" });
+  if (isBlank(b.email)) issues.push({ field: "email", message: "is required" });
+  else if (!EMAIL_SHAPE.test((b.email as string).trim())) {
+    issues.push({ field: "email", message: "is not a valid address" });
+  }
+  if (isBlank(b.mobileNumber)) issues.push({ field: "mobileNumber", message: "is required" });
   else if (!MOBILE_E164.test((b.mobileNumber as string).trim())) {
-    issues.push("mobileNumber must be E.164, e.g. +61412345678");
+    issues.push({ field: "mobileNumber", message: "must be E.164, e.g. +61412345678" });
   }
 
   if (issues.length > 0) throw new ValidationError(issues);
