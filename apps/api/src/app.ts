@@ -13,12 +13,27 @@ export function createApp() {
   });
 
   // Last-resort handler: anything a route didn't already turn into a typed
-  // response (e.g. malformed JSON body from express.json()). Express detects
-  // this as an error handler by its 4-arg arity, so all 4 params are required.
+  // response. Express detects this as an error handler by its 4-arg arity,
+  // so all 4 params are required.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    // express.json() throws a body-parser SyntaxError on malformed JSON,
+    // with .status/.statusCode already set to 400 - that's a client
+    // mistake, not a server fault, and every route shares this one parser,
+    // so this is the one place that can tell the two apart for all of them.
+    if (isClientBodyError(err)) {
+      return res.status(400).json({ error: "malformed JSON body" });
+    }
     console.error(err);
     res.status(500).json({ error: "internal server error" });
   });
 
   return app;
+}
+
+function isClientBodyError(err: unknown): boolean {
+  return (
+    err instanceof SyntaxError &&
+    "status" in err &&
+    (err as { status?: unknown }).status === 400
+  );
 }

@@ -121,4 +121,15 @@ describe("agent CRUD", () => {
     });
     expect(res.status).toBe(200);
   });
+
+  it("400s on malformed JSON instead of 500", async () => {
+    const res = await fetch(`${baseUrl}/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not valid json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as AgentResponse;
+    expect(body.error).toBeTruthy();
+  });
 });
