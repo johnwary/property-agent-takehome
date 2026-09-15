@@ -26,9 +26,14 @@ PGPASSWORD=verify psql -h localhost -p 55432 -U postgres -d verify \
 docker rm -f pg-verify
 ```
 
-Any PostgreSQL 14+ connection works; Docker is a convenience. Fixtures run in
-a transaction that is rolled back, so nothing persists. A failed assertion
-exits non-zero.
+**Use a disposable database only** - the command above, or an equivalent
+scratch database you don't mind losing. `schema.sql` drops and recreates
+every table this model defines and commits that immediately; it is
+destructive by design and there is no confirmation prompt. Never point it at
+a database holding data you want to keep.
+
+Only `verify.sql`'s own fixtures are transactional and rolled back. A failed
+assertion exits non-zero.
 
 ## Diagram
 

@@ -233,6 +233,36 @@ SELECT assert_rejects($$
   VALUES ('  ', 'Blank', 'blank.first@example.com', '+61412345671')
 $$, 'agent_first_name_not_blank');
 
+SELECT assert_rejects($$
+  INSERT INTO agent (first_name, last_name, email, mobile_number)
+  VALUES ('Blank', '  ', 'blank.last@example.com', '+61412345673')
+$$, 'agent_last_name_not_blank');
+
+SELECT assert_rejects($$
+  INSERT INTO agent (id, first_name, last_name, email, mobile_number, updated_at)
+  VALUES (gen_random_uuid(), 'Time', 'Traveller', 'time.traveller@example.com',
+          '+61412345674', now() - interval '1 day')
+$$, 'agent_updated_after_created');
+
+SELECT assert_rejects($$
+  INSERT INTO family (name) VALUES ('   ')
+$$, 'family_name_not_blank');
+
+SELECT assert_rejects($$
+  INSERT INTO property (agent_id, address_line1, suburb, state, postcode)
+  VALUES ('11111111-1111-1111-1111-111111111111', '  ', 'Melbourne', 'VIC', '3000')
+$$, 'property_address_not_blank');
+
+SELECT assert_rejects($$
+  INSERT INTO tenant (family_id, first_name, last_name)
+  VALUES ('22222222-2222-2222-2222-222222222222', '  ', 'Nguyen')
+$$, 'tenant_first_name_not_blank');
+
+SELECT assert_rejects($$
+  INSERT INTO tenant (family_id, first_name, last_name)
+  VALUES ('22222222-2222-2222-2222-222222222222', 'Blank', '  ')
+$$, 'tenant_last_name_not_blank');
+
 -- Agent email uniqueness is case-insensitive (citext).
 SELECT assert_rejects($$
   INSERT INTO agent (first_name, last_name, email, mobile_number)
