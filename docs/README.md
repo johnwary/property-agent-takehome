@@ -168,16 +168,22 @@ forcing an explicit reassignment is the safer default.
 
 ### Check constraints
 
-| Table | Constraint |
-| --- | --- |
-| `agent` | `char_length(trim(first_name)) > 0`, same for `last_name` |
-| `agent` | `email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'` |
-| `agent` | `mobile_number ~ '^\+[1-9]\d{7,14}$'` (E.164) |
-| `agent` | `updated_at >= created_at` |
-| `note` | `char_length(trim(body)) > 0` |
-| `note` | `completed_at IS NULL OR due_at IS NOT NULL` - only a reminder can be completed |
-| `note` | `completed_at IS NULL OR completed_at >= created_at` |
-| `property` | `char_length(trim(address_line1)) > 0` |
+Named as they appear in [`schema.sql`](./schema.sql).
+
+| Table | Name | Constraint |
+| --- | --- | --- |
+| `agent` | `agent_first_name_not_blank` | `char_length(btrim(first_name)) > 0` |
+| `agent` | `agent_last_name_not_blank` | `char_length(btrim(last_name)) > 0` |
+| `agent` | `agent_email_shape` | `email ~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'` |
+| `agent` | `agent_mobile_e164` | `mobile_number ~ '^\+[1-9][0-9]{7,14}$'` |
+| `agent` | `agent_updated_after_created` | `updated_at >= created_at` |
+| `family` | `family_name_not_blank` | `char_length(btrim(name)) > 0` |
+| `property` | `property_address_not_blank` | `char_length(btrim(address_line1)) > 0` |
+| `tenant` | `tenant_first_name_not_blank` | `char_length(btrim(first_name)) > 0` |
+| `tenant` | `tenant_last_name_not_blank` | `char_length(btrim(last_name)) > 0` |
+| `note` | `note_body_not_blank` | `char_length(btrim(body)) > 0` |
+| `note` | `note_completed_requires_due` | `completed_at IS NULL OR due_at IS NOT NULL` - only a reminder can be completed |
+| `note` | `note_completed_after_created` | `completed_at IS NULL OR completed_at >= created_at` |
 
 ## Notes vs reminders
 

@@ -158,6 +158,22 @@ SELECT assert_rejects($$
   VALUES ('11111111-1111-1111-1111-111111111111', 'Done, but never due.', now())
 $$, 'note_completed_requires_due');
 
+-- A note cannot be completed before it existed.
+SELECT assert_rejects($$
+  INSERT INTO note (agent_id, body, due_at, completed_at, created_at)
+  VALUES ('11111111-1111-1111-1111-111111111111', 'Completed in the past.',
+          now(), now() - interval '2 days', now() - interval '1 day')
+$$, 'note_completed_after_created');
+
+-- A reminder completed after it was created is fine.
+INSERT INTO note (agent_id, body, due_at, completed_at, created_at)
+VALUES ('11111111-1111-1111-1111-111111111111', 'Completed on time.',
+        now(), now(), now() - interval '1 day');
+
+SELECT assert(
+  (SELECT count(*) FROM note WHERE body = 'Completed on time.') = 1,
+  'a reminder may be completed after it was created');
+
 SELECT assert_rejects($$
   INSERT INTO note (agent_id, body)
   VALUES ('11111111-1111-1111-1111-111111111111', '   ')

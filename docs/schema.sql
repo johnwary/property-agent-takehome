@@ -157,7 +157,11 @@ CREATE TABLE note (
 
   -- Only a reminder can be completed.
   CONSTRAINT note_completed_requires_due
-    CHECK (completed_at IS NULL OR due_at IS NOT NULL)
+    CHECK (completed_at IS NULL OR due_at IS NOT NULL),
+
+  -- A note cannot be completed before it existed.
+  CONSTRAINT note_completed_after_created
+    CHECK (completed_at IS NULL OR completed_at >= created_at)
 );
 
 CREATE INDEX note_agent_idx ON note (agent_id);
